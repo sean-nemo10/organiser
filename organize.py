@@ -29,12 +29,113 @@ DEFAULT_MODEL = "phi4"
 
 # 分類カテゴリ一覧 — Ollamaへのプロンプトとフォルダ名に使用される
 CATEGORIES = [
-    "Invoice_Receipt",  # 請求書・領収書・注文確認
-    "Work_Documents",  # 業務資料・報告書・議事録
-    "Study_Materials",  # 教材・論文・技術資料・スライド
-    "Personal_Memos",  # 個人メモ・日記・手紙
+    "Invoice_Receipt",  # 請求書・領収書・注文確認・支払い関連
+    "University_Docs",  # 大学関連（オファーレター・時間割・説明資料・留学書類）
+    "Study_Materials",  # 教材・講義プリント・論文・技術資料・レポート・課題
+    "Travel_Plans",  # 旅行計画・予約確認・交通チケット・ホステル
+    "Personal_Documents",  # パスポート・証明書・契約書・個人の公式書類
     "Others",  # 上記に当てはまらないもの
 ]
+
+# カテゴリに対応するキーワード（モデルが外れた回答をした時の救済用）
+# モデルの回答にこれらのキーワードが含まれていればそのカテゴリに振り分ける
+CATEGORY_KEYWORDS = {
+    "Invoice_Receipt": [
+        "invoice",
+        "receipt",
+        "payment",
+        "billing",
+        "purchase",
+        "order",
+        "ticket",
+        "fare",
+        "fee",
+        "charge",
+        "refund",
+        "claim",
+        "請求",
+        "領収",
+        "支払",
+        "購入",
+        "注文",
+        "料金",
+    ],
+    "University_Docs": [
+        "university",
+        "college",
+        "enrollment",
+        "admission",
+        "offer",
+        "scholarship",
+        "exchange",
+        "study abroad",
+        "orientation",
+        "timetable",
+        "schedule",
+        "大学",
+        "留学",
+        "入学",
+        "奨学",
+        "オリエン",
+        "時間割",
+        "募集",
+        "派遣",
+    ],
+    "Study_Materials": [
+        "lecture",
+        "study",
+        "assignment",
+        "homework",
+        "exercise",
+        "lab",
+        "thesis",
+        "report",
+        "research",
+        "course",
+        "syllabus",
+        "textbook",
+        "授業",
+        "講義",
+        "課題",
+        "レポート",
+        "論文",
+        "教材",
+        "演習",
+    ],
+    "Travel_Plans": [
+        "travel",
+        "trip",
+        "hotel",
+        "hostel",
+        "booking",
+        "reservation",
+        "flight",
+        "train",
+        "itinerary",
+        "plan",
+        "tour",
+        "旅行",
+        "宿泊",
+        "予約",
+        "フライト",
+        "観光",
+    ],
+    "Personal_Documents": [
+        "passport",
+        "contract",
+        "agreement",
+        "certificate",
+        "id",
+        "insurance",
+        "visa",
+        "residence",
+        "パスポート",
+        "契約",
+        "証明",
+        "保険",
+        "在留",
+    ],
+}
 
 # Ollamaに送るテキストの最大文字数（長すぎると遅くなるため冒頭に絞る）
 MAX_CHARS = 1500
@@ -145,33 +246,52 @@ def classify(text: str, model: str) -> str | None:
     テキストをOllamaに送り、カテゴリ名を返す。
     接続失敗・予期しない回答の場合はNoneを返す（→ Uncategorized扱い）。
     """
-    # カテゴリリストを文字列に変換してプロンプトに埋め込む
-    categories_str = ", ".join(f'"{c}"' for c in CATEGORIES)
+    # カテゴリリストを番号付きで並べてモデルに選ばせる（小さいモデル向けに明確化）
+    numbered = "\n".join(f"  {i+1}. {cat}" for i, cat in enumerate(CATEGORIES))
 
     prompt = (
-        f"You are a file classifier. "
-        f"Classify the following document into exactly one of these categories: {categories_str}.\n"
-        f"Reply with only the category name, nothing else. Do not explain.\n\n"
-        f"Document:\n{text}"
+        f"You are a file classifier. Choose exactly one category for the document below.\n\n"
+        f"Categories:\n{numbered}\n\n"
+        f"Rules:\n"
+        f"- Reply with ONLY the category name (e.g. Study_Materials). No other text.\n"
+        f"- Do not explain. Do not add punctuation.\n\n"
+        f"Document:\n{text}\n\n"
+        f"Category:"
     )
 
     try:
         resp = requests.post(
             OLLAMA_API_URL,
             json={"model": model, "prompt": prompt, "stream": False},
-            timeout=60,  # 重いモデルに備えて余裕を持たせる
+            timeout=120,  # 重いモデルに備えて余裕を持たせる
         )
         resp.raise_for_status()
 
         # OllamaはJSONで{"response": "..."}を返す
         raw = resp.json().get("response", "").strip().strip('"').strip()
 
-        # 回答がカテゴリリストのいずれかに一致するか検証（部分一致も許容）
+        # Step 1: カテゴリ名の完全一致 / 部分一致で検証
         for cat in CATEGORIES:
             if cat.lower() in raw.lower():
                 return cat
 
-        # 一致しない場合は警告だけ出してNoneを返す
+        # Step 2: モデルが番号で答えた場合に対応（"1" → CATEGORIES[0] など）
+        for i, cat in enumerate(CATEGORIES):
+            if raw.strip() == str(i + 1):
+                print(f"  [info] 番号回答を変換: {raw!r} → {cat}")
+                return cat
+
+        # Step 3: モデルの回答からキーワードで救済分類
+        raw_lower = raw.lower()
+        for cat, keywords in CATEGORY_KEYWORDS.items():
+            for kw in keywords:
+                if kw in raw_lower:
+                    print(
+                        f"  [fallback] {raw!r} → キーワード '{kw}' で {cat} に振り分け"
+                    )
+                    return cat
+
+        # Step 4: すべて失敗した場合のみ警告
         print(f"  [warn] Ollamaの回答がカテゴリと一致しません: {raw!r}")
         return None
 

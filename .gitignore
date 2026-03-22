@@ -1,0 +1,6 @@
+# Personal data — do NOT commit to public repo
+classifications.json
+downloads_index.json
+
+# Claude Code project settings
+.claude/
